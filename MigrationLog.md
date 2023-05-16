@@ -60,7 +60,7 @@ gn gen out/m92 --args='is_debug=false is_component_build=false is_clang=true rtc
 sudo DEBIAN_FRONTEND=noninteractive apt install build-essential autoconf automake libxmu-dev python3-pygraphviz cvs mercurial bzr git cmake p7zip-full python3-matplotlib python-tk python3-dev qt5-qmake qt5-default gnuplot-x11 wireshark clang net-tools libpcap-dev libatomic-ops-dev -y
 ```
 用到Pcapplusplus项目
-[github地址](https://github/seladb/PcapPlusPlus/releases/tag/v22.11)
+[github地址](https://github.com/seladb/PcapPlusPlus/releases/tag/v22.11)
 
 设置环境变量
 ```
