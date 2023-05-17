@@ -73,11 +73,13 @@ if (last_update_time_ms_ != 0) {
   iat_ms = current_time_ms - last_update_time_ms_;
 }
 last_update_time_ms_ = current_time_ms;
+
+/*
+“iat”就是 inter-arrival time，也就是两个连续包之间的间隔。
+显然这里的改动是用时钟计时代替了 packet_iat_stopwatch_
+*/
 ```
 
-“iat”就是 inter-arrival time，也就是两个连续包之间的间隔。
-
-显然这里的改动是用时钟计时代替了`packet_iat_stopwatch_`
 
 ```cpp
 // modification
@@ -101,17 +103,17 @@ if (reordered) {
       0.8 * min_disordered_delay_ + 0.2f * relative_delay);
   RTC_LOG_D_C << "not reorder delay from reorder: " << relative_delay;
 }
+
+/*
+EMA(Exponential Moving Average) 是一种遍历数据点计算加权平均的方法，其比较看重当前数据点，可以通过平滑因子α进行调节：
+t = α*t + (1-α)*T
+上面过程的reorder_prob和disordered_delay_, min_dis_ordered_delay_都是用EMA计算的。
+
+如果发生乱序的同时，到达时间间隔还足够大，那么此次乱序的时间间隔需要纳入统计。
+more_delay_for_audience_ms_计算需要给观众引入更多的延迟。
+*/
 ```
 
-`reorder_prob`  是乱序的概率，是一个累计值。
-
-如果检测到这个包是乱序包，并且
-
-`relative_delay - min_disordered_delay_ > target_noret_ms_ / 2`
-
-那么计算：
-- `disordered_delay_`  累计失序延迟平方均值
-- `more_delay_for_audience_ms`  
 
 ```cpp
 // original
@@ -158,12 +160,15 @@ if (zorro::JoinChanExtraInfo::IsAudioFecEnabled(remote_info_)) {
 } else {
   target_level_ms_ = (safe_bucket_index + 1) * kBucketSizeMs;
 }
+
+/*
+Histogram用于维护直方图，Quantile是根据给定的量取分位点的函数。
+
+在开启了FEC的情况下，target_level_ms的计算分场景。计算过程涉及 target_noret_ms 和 more_delay_for_audience
+
+不开启FEC的情况下，target_level_ms_的计算直接根据分位点得出。
+*/
 ```
-
-计算音频预估缓冲量`target_level_ms`的算法进行改动。
-- 在开启了音频FEC的情况下，加入了不同场景的判断；
-- `int webrtc::Histogram::Quantile(int probability)`的功能是计算分位点。这里`histogram_->Quantile((1 << 30) * 0.97)`是计算97%的分位点，因为Histogram的区间总长就是`1<<30`
-
 
 ## webrtc::RtpSeqNumOnlyRefFinder
 
@@ -188,7 +193,85 @@ if (zorro::JoinChanExtraInfo::IsAudioFecEnabled(remote_info_)) {
 ![VCMTiming2](images/c29735b45308a174767fa48680eee21b.png)
 zorro对`VCMTiming::UpdateCurrentDelay(int64_t render_time_ms,int64_t actual_decode_time_ms)`做了大量修改：
 
+```cpp
+void VCMTiming::UpdateCurrentDelay(int64_t render_time_ms,
+                                   int64_t actual_decode_time_ms) {
+  MutexLock lock(&mutex_);
+  int64_t target_delay_ms = TargetDelayInternal();
+  int64_t decode_delay_ms = RequiredDecodeTimeMs();
+  // current delay is caculated based on buffer, decodabale time, and jitter delay.
+  // Current delay to become too large than jitter delay meaans jitter delay cannot represent
+  // frames jitter because of late decodable time and shallow buffer. In this case we adopt a
+  // more agressive delay estimation to reduce dependency for jitter delay.
+  if (jitter_delay_ms_ > 0) {
+    float extra_need_delay = (float)(current_delay_ms_ - decode_delay_ms) / (float)jitter_delay_ms_;
+    if (!enlarged_percentile_ && extra_need_delay > percentile_update_threshold_) {
+      RTC_LOG_D_C << "current delay / up";
+      cur_delay_filter_.ResetPercentile(0.99f);
+      enlarged_percentile_ = true;
+    }
+    if (enlarged_percentile_ && extra_need_delay < 0.6 * percentile_update_threshold_) {
+      RTC_LOG_D_C << "current delay / down";
+      cur_delay_filter_.ResetPercentile(0.90f);
+      enlarged_percentile_ = false;
+    }
+  }
+  /*
+  调整百分比 :当发现current delay已经远超jitter delay时，提高percentile；当发现percentile过低时会回调
+  这个percentile用于下面的到current delay的值
 
+  PercentileFilter实际上就是通过接收很多数据点，然后根据设置的百分比返回分位点
+  */
+
+
+
+
+  // Now, delayed ms = decodable time - render time - buffering time
+  // - (time to decode and render) + jitter delay
+  int64_t delayed_ms = actual_decode_time_ms -
+                       (render_time_ms - decode_delay_ms - render_delay_ms_) +
+                       jitter_delay_ms_;
+  // Update current delay filter.
+  int64_t current_delay_ms = current_delay_ms_ + delayed_ms;
+  cur_delay_filter_.Insert(current_delay_ms);
+  history_.emplace(current_delay_ms, actual_decode_time_ms);
+  while (!history_.empty() &&
+      actual_decode_time_ms - history_.front().sample_time_ms > kDelayDetectWindowMs) {
+    cur_delay_filter_.Erase(history_.front().delay_time_ms);
+    history_.pop();
+  }
+/*
+  计算并加入delay的增值
+  同时维护 cur_delay_filter_，用的是一个queue of Samples: history_，目的是使cur_delay_filter里的数据点都只在一个时间窗口内
+*/
+
+
+
+
+  // Unbind current_delay with target_delay to allow more chances for retransmit
+  current_delay_ms = cur_delay_filter_.GetPercentileValue();
+  // Smooth current_delay_ms changes.
+  current_delay_ms_ = current_delay_ms > current_delay_ms_ ? current_delay_ms :
+      0.9f * current_delay_ms_ + 0.1f * current_delay_ms;
+  // Limit current delay between MaxVideoDelay and Jitter Delay.
+  if (current_delay_ms > kMaxVideoDelayMs) {
+    current_delay_ms_ = kMaxVideoDelayMs;
+  } else if (current_delay_ms < target_delay_ms) {
+    current_delay_ms_ = target_delay_ms;
+  } else {
+    current_delay_ms_ = current_delay_ms;
+  }
+
+  /*
+  最终确定current delay ms的值
+  1. 从数据点中选择一个分位点
+  2. 如果分位点delay较大就选分位点，这样有助于使current delay和target delay解绑；否则加权算均值
+
+  还需要限定范围[target_delay_ms, kMaxVideoDelayMs]
+  */
+...
+}
+```
 
 ![VCMTiming3](images/e0d2b4fb6ef49dbd118457dc76306081.png)
 
