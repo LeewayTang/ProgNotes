@@ -52,6 +52,56 @@ VideoTrackVector video_tracks_;
 
 # Zorro SDK 在接收端的修改
 
+## webrtc::voe::ChannelReceive
+
+`audio/channel_receive.cc`
+
+接收音频数据包，主要改动是添加了2个函数
+
+```cpp
+absl::optional<int32_t> ChannelReceive::GetEstimatedE2EDelay() {
+  uint32_t rtp_timestamp;
+  int64_t time_ms;
+  if (GetPlayoutRtpTimestamp(&rtp_timestamp, &time_ms)) {
+    int64_t playout_ntp_ms;
+    absl::optional<ZorroNtpClockOffset> sender_clock_offset;
+    {
+      MutexLock lock(&ts_stats_lock_);
+      if (rtp_to_ntp_.Estimate(rtp_timestamp, &playout_ntp_ms)) {
+        sender_clock_offset = sender_clock_offset_;
+      }
+    }
+    auto e2e_clock_offset =
+        ZorroNtpClockOffsetReceiver::GetSenderClockOffset(sender_clock_offset);
+    if (e2e_clock_offset) {
+      constexpr int kMaxNotUpdateTimeMs = 2000;
+      // GetPlayoutRtpTimestamp获取的time_ms是网络收到rtp音频的时间点,考虑到neteq缓存,kMaxNotUpdateTimeMs不能太小
+      // 需要加上与time_ms的时间偏差才是当前的播放位置,超过kMaxNotUpdateTimeMs后就认为没有数据可播放了,此时返回无效数据-1
+      auto time_us = rtc::TimeMicros();
+      uint32_t time_since_last_playout_ms = (time_us / 1000 - time_ms);
+      if (time_since_last_playout_ms > kMaxNotUpdateTimeMs) {
+        return -1;
+      }
+      auto sender_ntp_ms =
+          webrtc::TimeMicrosToNtp(time_us).ToMs() + *e2e_clock_offset;
+      playout_ntp_ms += time_since_last_playout_ms;
+      return sender_ntp_ms > playout_ntp_ms ? sender_ntp_ms - playout_ntp_ms
+                                            : -1;
+    }
+  }
+  return absl::nullopt;
+}
+
+absl::optional<int64_t> ChannelReceive::GetE2EClockOffset() {
+  absl::optional<ZorroNtpClockOffset> sender_clock_offset;
+  {
+    MutexLock lock(&ts_stats_lock_);
+    sender_clock_offset = sender_clock_offset_;
+  }
+  return ZorroNtpClockOffsetReceiver::GetSenderClockOffset(sender_clock_offset);
+}
+```
+
 ## webrtc::DelayManager
 `modules/audio_coding/neteq/delay_manager.cc`
 
