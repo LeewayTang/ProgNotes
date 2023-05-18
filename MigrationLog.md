@@ -73,6 +73,8 @@ export LDFLAGS_EXTRA="-latomic -ldl -lpcap"
 ## 流程跟踪
 
 pcap-webrtc内部将ns3下的网络包对接到WebRTC之中。
+
+`FrameBuffer2` 和 `NetEqImpl` 是视频/音频的帧数据在播放之前的缓冲区，从Call接收RTP数据到缓冲区的过程如下流程图所示：
 ```mermaid
 graph TB;
     subgraph test::CallClient;
@@ -89,13 +91,61 @@ graph TB;
     subgraph RtpDemuxer;
         F["bool OnRtpPacket(...)"];
     end;
+    subgraph ChannelReceive;
+        G["void OnRtpPacket(...)"];
+        H["void ReceivePacket(...)"];
+        I["void OnReceivedPayloadData(...)"];
+    end;
+    subgraph AcmReceiver;
+        J["int InsertPacket(...)"];
+    end;
+    subgraph NetEqImpl;
+        K["int InsertPacket(...)"];
+        L["int InsertPacketInternal(...)"];
+    end;
+
+    subgraph RtpVideoStreamReceiver2;
+        A1["void OnInsertPacket(...)"];
+        B1["void OnAssembledFrame(...)"];
+        I1["void OnCompleteFrame(...)"];
+    end;
+    subgraph PacketBuffer;
+        C1["InsertResult InsertPacket(...)"];
+        D1["vector FindFrames(...)"];
+    end;
+    subgraph RtpSeqNumOnlyRefFinder;
+        E1["ReturnVector ManageFrame(...)"];
+    end;
+    subgraph RtpFrameReferenceFinder;
+        F1["void ManageFrame(...)"];
+        G1["void HandOffFrames(...)"];
+    end;
+    subgraph VideoReceiveStream2;
+        J1["void OnCompleteFrame(...)"];
+    end;
+    subgraph FrameBuffer2;
+        K1["int64_t InsertFrame(...)"];
+    end;
+
 
     A-->B;
     B-->C;
     B-->D;
     C-->E;
     E-->F;
-
+    F-->G;
+    G-->H;H-->I;
+    I-->J;J-->K;K-->L;
+    F-->A1;
+    A1-->C1;
+    C1-->D1;
+    D1-->B1;
+    B1-->F1;
+    F1-->E1;
+    E1-->G1;
+    G1-->I1;
+    I1-->J1;
+    J1-->K1;
 ```
 
 ## 音频
@@ -149,28 +199,7 @@ graph TB;
 
 ### 理解组帧过程
 
-H264的reference finder是依据sequence number的
-从接收视频数据包开始，组帧的过程如下所示：
-``` mermaid
-graph TB;
-    subgraph RtpVideoStreamReceiver2;
-        A["void OnInsertPacket(...)"];
-        B["void OnAssembledFrame(...)"];
-    end;
-    subgraph PacketBuffer;
-        C["InsertResult InsertPacket(...)"];
-        D["vector FindFrames(...)"];
-    end;
-    subgraph RtpSeqNumOnlyRefFinder;
-        E["ReturnVector ManageFrame(...)"];
-    end;
-
-    A-->C;
-    C-->D;
-    D-->B;
-    B-->E;
-
-```
+H264的reference finder是依据sequence number的。
 
 Frame Stash观察
 
