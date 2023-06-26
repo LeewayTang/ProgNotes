@@ -76,7 +76,9 @@ void Histogram::Add(int value) {
 - sw 遗忘因子初始权重
 
 初步计算
-$$\begin{array}{l}S=\sum_0^n b[i]\times f \\ b[v] = b[i] + (1-f)\\S=S+(1-f) \end{array}$$
+$$S=\sum_0^n b[i]\times f $$
+$$ b[v] = b[i] + (1-f)$$
+$$S=S+(1-f) $$
 
 调整（补偿）最后一个概率，保证归一化
 
